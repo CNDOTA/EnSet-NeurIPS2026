@@ -152,7 +152,7 @@ class Particle(MultiAgentEnv):
         self.env.render(**kwargs)
 
     def close(self):
-        raise NotImplementedError
+        pass
 
     def seed(self):
         raise NotImplementedError

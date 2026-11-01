@@ -9,4 +9,4 @@ pip install "protobuf<3.21" -U git+https://github.com/oxwhirl/smacv2.git@ranges
 
 
 how to run:
-python src/main.py --config=enset_qmix --env-config=sc2_gen_zerg with env_args.capability_config.n_units=10 env_args.capability_config.start_positions.n_enemies=10 > zerg_10_vs_10.log 2>&1 &
+python src/main.py --config=enset_qmix --env-config=sc2_gen_zerg with env_args.capability_config.n_units=10 env_args.capability_config.n_enemies=10 > zerg_10_vs_10.log 2>&1 &

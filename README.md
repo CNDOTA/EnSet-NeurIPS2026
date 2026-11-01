@@ -48,7 +48,7 @@ Use `t_max=520000` for 2s3z, 3s5z, and 10m_vs_11m, and `t_max=1020000` for the o
 
 ```
 cd smacv2
-python src/main.py --config=enset_qmix --env-config=sc2_gen_zerg with env_args.capability_config.n_units=10 env_args.capability_config.start_positions.n_enemies=10 seed=1
+python src/main.py --config=enset_qmix --env-config=sc2_gen_zerg with env_args.capability_config.n_units=10 env_args.capability_config.n_enemies=10 seed=1
 ```
 
 Use `--env-config=sc2_gen_protoss`, `sc2_gen_terran`, or `sc2_gen_zerg` for the three races. The default replay ratio is 15. Add `replay_ratio=10` for a replay ratio of 10. The baseline QMIX uses `--config=qmix`.
