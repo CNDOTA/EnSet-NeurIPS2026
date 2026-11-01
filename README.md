@@ -78,6 +78,19 @@ All EnSet hyperparameters are shared across algorithms, tasks, and environments.
 
 Results are written by Sacred to `results/`.
 
+## Citation
+
+If you find this code useful, please cite our paper:
+
+```bibtex
+@inproceedings{yang2026boosting,
+  title     = {Boosting Multiagent Reinforcement Learning at High Replay Ratios with Ensemble Reset},
+  author    = {Yang, Yaodong and Tang, Hongyao and Chen, Guangyong and Heng, Pheng-Ann},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2026}
+}
+```
+
 ## Acknowledgements
 
 This code is built on [PyMARL](https://github.com/oxwhirl/pymarl), [pymarl2](https://github.com/hijkzzz/pymarl2), [SMAC](https://github.com/oxwhirl/smac), [SMACv2](https://github.com/oxwhirl/smacv2), and [FACMAC](https://github.com/oxwhirl/facmac). We thank the authors for releasing their code.
