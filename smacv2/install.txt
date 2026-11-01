@@ -1,0 +1,12 @@
+conda create -n pymarl2 python=3.7 -y
+conda activate pymarl2
+
+conda install pytorch==1.11.0 torchvision==0.12.0 torchaudio==0.11.0 cudatoolkit=11.3 -c pytorch
+
+pip install pymongo -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install sacred numpy scipy gym==0.10.8 matplotlib seaborn pyyaml pygame pytest probscale imageio snakeviz tensorboard-logger wandb -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install "protobuf<3.21" -U git+https://github.com/oxwhirl/smacv2.git@ranges
+
+
+how to run:
+python src/main.py --config=enset_qmix --env-config=sc2_gen_zerg with env_args.capability_config.n_units=10 env_args.capability_config.start_positions.n_enemies=10 > zerg_10_vs_10.log 2>&1 &

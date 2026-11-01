@@ -1,0 +1,290 @@
+import copy
+import random
+from functools import partial
+
+from components.episode_buffer import EpisodeBatch
+from modules.mixers.enmix import EMixer
+from modules.mixers.vdn import VDNMixer
+from modules.mixers.qatten import QattenMixer
+from envs.one_step_matrix_game import print_matrix_status
+from utils.rl_utils import build_td_lambda_targets, build_q_lambda_targets
+import torch as th
+from torch.optim import RMSprop, Adam
+import numpy as np
+from torch.distributions import Categorical
+from utils.th_utils import get_parameters_num
+
+from modules.mixers.enmix import ActivateLayer
+
+dormant_alpha_list = [0.1, 0.2, 0.3]
+overactive_beta_list = [2.0, 2.5, 3.0]
+
+class EnSetNQLearner:
+    def __init__(self, mac, scheme, logger, args):
+        self.args = args
+        self.mac = mac
+        self.logger = logger
+
+        self.params = list(mac.parameters())
+
+        self.last_target_update_episode = 0
+        self.last_reset_network_episode = 0
+        self.device = th.device('cuda' if args.use_cuda  else 'cpu')
+
+        if args.mixer == "qatten":
+            self.mixer = QattenMixer(args)
+        elif args.mixer == "vdn":
+            self.mixer = VDNMixer()
+        elif args.mixer == "qmix":
+            self.mixer = EMixer(args)
+        else:
+            raise "mixer error"
+        self.target_mixer = copy.deepcopy(self.mixer)
+        self.params += list(self.mixer.parameters())
+
+        print('Mixer Size: ')
+        print(get_parameters_num(self.mixer.parameters()))
+
+        if self.args.optimizer == 'adam':
+            self.optimiser = Adam(params=self.params,  lr=args.lr)
+        else:
+            self.optimiser = RMSprop(params=self.params, lr=args.lr, alpha=args.optim_alpha, eps=args.optim_eps)
+
+        # a little wasteful to deepcopy (e.g. duplicates action selector), but should work for any MAC
+        self.target_mac = copy.deepcopy(mac)
+
+        # used for reset
+        self.initial_mac = copy.deepcopy(mac)
+        self.initial_mixer = copy.deepcopy(self.mixer)
+
+        self.log_stats_t = -self.args.learner_log_interval - 1
+        
+        self.train_t = 0
+
+        self.neu_stats = {}
+        # Return an iterator over all modules in the network, both the name and the module itself.
+        for (name, module) in self.mixer.named_modules():
+            # if isinstance(module, th.nn.Linear) or isinstance(module, ActivateLayer):
+            if isinstance(module, ActivateLayer):
+                def hook(module, fea_in, fea_out, module_name):
+                    self.neu_stats[module_name] = th.mean(th.abs(fea_out), dim=0)  # (bs, dim) -> (dim)
+                module.register_forward_hook(partial(hook, module_name=name))
+
+    def train(self, batch: EpisodeBatch, t_env: int, episode_num: int):
+        # Get the relevant quantities
+        rewards = batch["reward"][:, :-1].to(self.device)
+        actions = batch["actions"][:, :-1].to(self.device)
+        terminated = batch["terminated"][:, :-1].float().to(self.device)
+        mask = batch["filled"][:, :-1].float().to(self.device)
+        mask[:, 1:] = mask[:, 1:] * (1 - terminated[:, :-1]).to(self.device)
+        avail_actions = batch["avail_actions"].to(self.device)
+
+        for key in self.neu_stats.keys():
+            self.neu_stats[key] = th.zeros_like(self.neu_stats[key], device=self.args.device)
+
+        # batch['obs']: btav
+        # batch["state"]: (batch_size, time_step, state_dim)
+        # move_feats, enemy_feats, ally_feats, own_feats, last_action, agent_id
+        # (visible, distance, relative X, relative Y, health, [shield], [type])
+        # state: allies, enemies, [last_action], [timestep]
+
+        if self.args.random_amplitude_scaling:
+            for i in range(batch['obs'].shape[0]):
+                z = random.uniform(0.8, 1.2)  # default is [0.8, 1.2]
+                batch['obs'][i] = batch['obs'][i] * z
+                batch["state"][i] = batch["state"][i] * z
+
+        if self.args.random_amplitude_scale_and_perturb:  # obs scale, state perturb
+            agent_n_dim = self.args.n_agents * self.args.unit_dim
+            enemy_n_dim = self.args.n_enemies * self.args.enemy_dim
+            for i in range(batch['obs'].shape[0]):
+                z_s = random.uniform(0.8, 1.2)  # default is [0.8, 1.2]
+                z_x = random.uniform(-self.args.perturb_alpha, self.args.perturb_alpha)
+                z_y = random.uniform(-self.args.perturb_alpha, self.args.perturb_alpha)
+                batch['obs'][i] = batch['obs'][i] * z_s  # scale obs
+                # agents feature: health, cd/energy, central_x, central_y, others; agent_states: (ts, unit_dim * n_agents) -> (ts, n_agents, unit_dim)
+                agent_states = batch["state"][i][:, :agent_n_dim].reshape(-1, self.args.n_agents, self.args.unit_dim)
+                agent_x = agent_states[:, :, 2] + z_x
+                agent_y = agent_states[:, :, 3] + z_y
+                agent_states[:, :, 2] = agent_x
+                agent_states[:, :, 3] = agent_y
+                batch["state"][i][:, :agent_n_dim] = agent_states.reshape(-1, agent_n_dim)  # perturb agent
+                # enemies feature: health, central_x, central_y, others; enemy_states: (ts, enemy_dim * n_enemies) -> (ts, n_enemies, enemy_dim)
+                enemy_states = batch["state"][i][:, agent_n_dim: agent_n_dim + enemy_n_dim].reshape(-1, self.args.n_enemies, self.args.enemy_dim)
+                enemy_x = enemy_states[:, :, 1] + z_x
+                enemy_y = enemy_states[:, :, 2] + z_y
+                enemy_states[:, :, 1] = enemy_x
+                enemy_states[:, :, 2] = enemy_y
+                batch["state"][i][:, agent_n_dim: agent_n_dim + enemy_n_dim] = enemy_states.reshape(-1, enemy_n_dim)  # perturb enemy
+
+        # Calculate estimated Q-Values
+        mac_out = []
+        self.mac.init_hidden(batch.batch_size)
+        for t in range(batch.max_seq_length):
+            agent_outs = self.mac.forward(batch, t=t)
+            mac_out.append(agent_outs)
+        mac_out = th.stack(mac_out, dim=1)  # Concat over time
+        # Pick the Q-Values for the actions taken by each agent
+        chosen_action_qvals = th.gather(mac_out[:, :-1], dim=3, index=actions).squeeze(3)  # Remove the last dim
+        chosen_action_qvals_ = chosen_action_qvals
+        # Calculate the Q-Values necessary for the target
+        with th.no_grad():
+            target_mac_out = []
+            self.target_mac.init_hidden(batch.batch_size)
+            for t in range(batch.max_seq_length):
+                target_agent_outs = self.target_mac.forward(batch, t=t)
+                target_mac_out.append(target_agent_outs)
+
+            # We don't need the first timesteps Q-Value estimate for calculating targets
+            target_mac_out = th.stack(target_mac_out, dim=1)  # Concat across time
+
+            # Max over target Q-Values/ Double q learning
+            mac_out_detach = mac_out.clone().detach()
+            mac_out_detach[avail_actions == 0] = -9999999
+            cur_max_actions = mac_out_detach.max(dim=3, keepdim=True)[1]
+            target_max_qvals = th.gather(target_mac_out, 3, cur_max_actions).squeeze(3)
+            
+            # Calculate n-step Q-Learning targets
+            target_max_qvals = self.target_mixer(target_max_qvals, batch["state"])
+
+            if getattr(self.args, 'q_lambda', False):
+                qvals = th.gather(target_mac_out, 3, batch["actions"]).squeeze(3)
+                qvals = self.target_mixer(qvals, batch["state"])
+
+                targets = build_q_lambda_targets(rewards, terminated, mask, target_max_qvals, qvals,
+                                    self.args.gamma, self.args.td_lambda)
+            else:
+                targets = build_td_lambda_targets(rewards, terminated, mask, target_max_qvals, 
+                                                    self.args.n_agents, self.args.gamma, self.args.td_lambda)
+                # targets (bs, el, N)
+
+        # Mixer
+        chosen_action_qvals = self.mixer(chosen_action_qvals, batch["state"][:, :-1])
+
+        td_error = (chosen_action_qvals - targets.detach())
+        td_error = 0.5 * td_error.pow(2)
+
+        mask = mask.expand_as(td_error)
+        masked_td_error = td_error * mask
+        loss = L_td = masked_td_error.sum() / mask.sum()
+
+        if t_env - self.log_stats_t >= self.args.learner_log_interval:
+            _, _, _ = self.check_neuron_stats(t_env, is_log=True)
+
+        # Optimise
+        self.optimiser.zero_grad()
+        loss.backward()
+        grad_norm = th.nn.utils.clip_grad_norm_(self.params, self.args.grad_norm_clip)
+        self.optimiser.step()
+
+        if (episode_num - self.last_target_update_episode) / self.args.target_update_interval >= 1.0:
+            self._update_targets()
+            self.last_target_update_episode = episode_num
+
+        if self.args.reset_mode is not None:
+            if (episode_num - self.last_reset_network_episode) / self.args.reset_interval >= 1.0:  # RR reset once!
+                # self.optimiser = RMSprop(params=self.params, lr=self.args.lr, alpha=self.args.optim_alpha, eps=self.args.optim_eps)
+                if self.args.reset_mode == 'hard':
+                    self._hard_reset_networks()
+                elif self.args.reset_mode == 'shrink_and_perturb':
+                    self._shrink_and_perturb_networks(self.args.reset_agent_alpha, self.args.reset_mixer_alpha)
+                else:
+                    raise NotImplementedError('Unknown reset mode')
+                self.last_reset_network_episode = episode_num
+                self.logger.console_logger.info('Reset my network')
+
+        if t_env - self.log_stats_t >= self.args.learner_log_interval:
+            self.logger.log_stat("loss_td", L_td.item(), t_env)
+            self.logger.log_stat("grad_norm", grad_norm, t_env)
+            mask_elems = mask.sum().item()
+            self.logger.log_stat("td_error_abs", (masked_td_error.abs().sum().item()/mask_elems), t_env)
+            self.logger.log_stat("q_taken_mean", (chosen_action_qvals * mask).sum().item()/(mask_elems * self.args.n_agents), t_env)
+            self.logger.log_stat("target_mean", (targets * mask).sum().item()/(mask_elems * self.args.n_agents), t_env)
+            self.log_stats_t = t_env
+            
+            # print estimated matrix
+            if self.args.env == "one_step_matrix_game":
+                print_matrix_status(batch, self.mixer, mac_out)
+
+    def check_neuron_stats(self, t_env, is_log=False):
+        mixer_dormant_neuron_count_list = [[0] * self.args.mixer_ensemble_N for _ in range(len(dormant_alpha_list))]
+        mixer_overactive_neuron_count_list = [[0] * self.args.mixer_ensemble_N for _ in range(len(overactive_beta_list))]
+        # mixer_normal_neuron_count_list = [0] * self.args.mixer_ensemble_N
+        mixer_total_neuron_count_list = [0] * self.args.mixer_ensemble_N
+
+        for name, item in self.neu_stats.items():
+            # item: (dim)
+            avg = item.mean()
+
+            dormant_count_list = [th.count_nonzero(item <= dormant_alpha * avg).item() for dormant_alpha in dormant_alpha_list]
+            overactive_count_list = [th.count_nonzero(item > overactive_beta * avg).item() for overactive_beta in overactive_beta_list]
+            # normal_count = th.count_nonzero((dormant_alpha * avg < item) & (item <= overactive_beta * avg)).item()
+
+            # print('{} dead neuron {} in total {} neurons'.format(name, dormant_count_list, item.shape[0]))
+
+            # name like 'hyper_w_final_list.0.0'
+            for k in range(len(dormant_alpha_list)):
+                mixer_dormant_neuron_count_list[k][int(name.split('.')[1])] += dormant_count_list[k]
+            for k in range(len(overactive_beta_list)):
+                mixer_overactive_neuron_count_list[k][int(name.split('.')[1])] += overactive_count_list[k]
+            mixer_total_neuron_count_list[int(name.split('.')[1])] += item.shape[0]
+
+        if is_log:
+            for i in range(self.args.mixer_ensemble_N):
+                for k in range(len(dormant_alpha_list)):
+                    self.logger.log_stat("{}th_mixer_{}_dormant".format(i, dormant_alpha_list[k]), mixer_dormant_neuron_count_list[k][i] / mixer_total_neuron_count_list[i], t_env)
+                for k in range(len(overactive_beta_list)):
+                    self.logger.log_stat("{}th_mixer_{}_overactive".format(i, overactive_beta_list[k]), mixer_overactive_neuron_count_list[k][i] / mixer_total_neuron_count_list[i], t_env)
+
+        return mixer_dormant_neuron_count_list, mixer_overactive_neuron_count_list, mixer_total_neuron_count_list
+
+
+    def _update_targets(self):
+        self.target_mac.load_state(self.mac)
+        if self.mixer is not None:
+            self.target_mixer.load_state_dict(self.mixer.state_dict())
+        self.logger.console_logger.info("Updated target network")
+
+    def _hard_reset_networks(self):
+        self.mac.load_state(self.initial_mac)
+        self.target_mac.load_state(self.initial_mac)
+        if self.mixer is not None:
+            self.mixer.load_state_dict(self.initial_mixer.state_dict())
+            self.target_mixer.load_state_dict(self.initial_mixer.state_dict())
+        self.logger.console_logger.info("Hard reset online and target networks")
+
+    def _shrink_and_perturb_networks(self, reset_agent_alpha, reset_mixer_alpha):
+        for param, initial_param in zip(self.mac.parameters(), self.initial_mac.parameters()):
+            param.data.copy_(initial_param.data * (1.0 - reset_agent_alpha) + param.data * reset_agent_alpha)
+        for target_param, initial_param in zip(self.target_mac.parameters(), self.initial_mac.parameters()):
+            target_param.data.copy_(initial_param.data * (1.0 - reset_agent_alpha) + target_param.data * reset_agent_alpha)
+
+        if self.mixer is not None:
+            for param, initial_param in zip(self.mixer.parameters(), self.initial_mixer.parameters()):
+                param.data.copy_(initial_param.data * (1.0 - reset_mixer_alpha) + param.data * reset_mixer_alpha)
+            for target_param, initial_param in zip(self.target_mixer.parameters(), self.initial_mixer.parameters()):
+                target_param.data.copy_(initial_param.data * (1.0 - reset_mixer_alpha) + target_param.data * reset_mixer_alpha)
+        self.logger.console_logger.info("Shrink and perturb online and target networks")
+
+    def cuda(self):
+        self.mac.cuda()
+        self.target_mac.cuda()
+        self.initial_mac.cuda()
+        if self.mixer is not None:
+            self.mixer.cuda()
+            self.target_mixer.cuda()
+            self.initial_mixer.cuda()
+
+    def save_models(self, path):
+        self.mac.save_models(path)
+        if self.mixer is not None:
+            th.save(self.mixer.state_dict(), "{}/mixer.th".format(path))
+        th.save(self.optimiser.state_dict(), "{}/opt.th".format(path))
+
+    def load_models(self, path):
+        self.mac.load_models(path)
+        # Not quite right but I don't want to save target networks
+        self.target_mac.load_models(path)
+        if self.mixer is not None:
+            self.mixer.load_state_dict(th.load("{}/mixer.th".format(path), map_location=lambda storage, loc: storage))
+        self.optimiser.load_state_dict(th.load("{}/opt.th".format(path), map_location=lambda storage, loc: storage))
