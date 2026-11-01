@@ -1,6 +1,6 @@
-# EnSet: Boosting MARL at High Replay Ratios
+# Boosting Multiagent Reinforcement Learning at High Replay Ratios with Ensemble Reset
 
-Code for the NeurIPS 2026 paper "EnSet". EnSet trains multiagent reinforcement learning (MARL) at high replay ratios with two components on the centralized global Q-network:
+Code for the NeurIPS 2026 paper "Boosting Multiagent Reinforcement Learning at High Replay Ratios with Ensemble Reset". Ensemble Reset (EnSet) trains multiagent reinforcement learning (MARL) at high replay ratios with two components on the centralized global Q-network:
 
 - **Global Q-network ensemble reset**: an ensemble of $H$ global Q-networks trained with the averaged loss, plus periodic Shrink & Perturb on the global Q-networks and agent networks.
 - **Multiagent translation augmentation**: a random translation of all unit positions in the global state.
