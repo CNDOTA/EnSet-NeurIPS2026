@@ -71,15 +71,13 @@ Main EnSet files:
 
 ## Installation
 
-SMAC follows PyMARL and MPE follows FACMAC. See `smac/README.md` and `mpe/README.md` for the Docker setup. In short:
+Please follow the installation instructions of the codebases we build on:
 
-```
-cd smac            # or mpe
-cd docker && bash build.sh && cd ..
-bash install_sc2.sh  # SMAC only
-```
+- `smac/`: [PyMARL](https://github.com/oxwhirl/pymarl) and [SMAC](https://github.com/oxwhirl/smac)
+- `smacv2/`: [pymarl2](https://github.com/hijkzzz/pymarl2) and [SMACv2](https://github.com/oxwhirl/smacv2)
+- `mpe/`: [FACMAC](https://github.com/oxwhirl/facmac)
 
-SMACv2 follows pymarl2. See `smacv2/install.txt` for the conda setup, which installs SMACv2 from `git+https://github.com/oxwhirl/smacv2.git@ranges`. We use StarCraft II version 4.6.2.69232.
+We use StarCraft II version 4.6.2.69232.
 
 ## Running
 
