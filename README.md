@@ -1,9 +1,57 @@
+<div align="center">
+
 # Boosting Multiagent Reinforcement Learning at High Replay Ratios with Ensemble Reset
 
-Code for the NeurIPS 2026 paper "Boosting Multiagent Reinforcement Learning at High Replay Ratios with Ensemble Reset". Ensemble Reset (EnSet) trains multiagent reinforcement learning (MARL) at high replay ratios with two components on the centralized global Q-network:
+[![NeurIPS 2026](https://img.shields.io/badge/NeurIPS-2026-blue)](https://neurips.cc/Conferences/2026)
+[![License](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE)
 
-- **Global Q-network ensemble reset**: an ensemble of $H$ global Q-networks trained with the averaged loss, plus periodic Shrink & Perturb on the global Q-networks and agent networks.
-- **Multiagent translation augmentation**: a random translation of all unit positions in the global state.
+</div>
+
+Official code for the NeurIPS 2026 paper "Boosting Multiagent Reinforcement Learning at High Replay Ratios with Ensemble Reset".
+
+## Overview
+
+A high replay ratio updates the networks many times per environment interaction. It is an effective way to improve sample efficiency in reinforcement learning. In multiagent reinforcement learning (MARL), we find that high replay ratios induce a severe dormant neuron problem in the centralized global Q-network. Many neurons become inactive, which reduces network capacity and destabilizes learning.
+
+We propose **Ensemble Reset (EnSet)** to stabilize MARL training at high replay ratios. EnSet has two components on the global Q-network:
+
+- **Global Q-network ensemble reset**: an ensemble of $H$ global Q-networks trained with the averaged loss, plus periodic Shrink & Perturb on the global Q-networks and agent networks. Our theory shows that the ensemble reduces the gradient mean and variance of each global Q-network, thus reducing the probability of dormant neurons.
+- **Multiagent translation augmentation**: a random translation of all unit positions in the global state. It exploits multiagent translation invariance to diversify replay experience and prevent overfitting.
+
+<p align="center">
+  <img src="assets/framework.png" width="95%">
+</p>
+<p align="center"><em>The EnSet framework, trained under a high replay ratio N<sub>RR</sub>.</em></p>
+
+### Dormant neurons at high replay ratios
+
+With QMIX, the dormant neuron rate in the global Q-network grows with the replay ratio. At a replay ratio of 10, learning collapses.
+
+<p align="center">
+  <img src="assets/dormant_neuron.png" width="100%">
+</p>
+
+## Results
+
+EnSet consistently improves various MARL algorithms at high replay ratios with fewer environment steps in SMAC, MPE, and SMACv2.
+
+**SMAC.** EnSet-QMIX, EnSet-QPLEX, and EnSet-ATM use a replay ratio of 10. QMIX, QPLEX, and ATM use the default replay ratio of 1. Solid lines are medians and shaded areas are the 25th to 75th percentiles.
+
+<p align="center">
+  <img src="assets/smac_results.png" width="100%">
+</p>
+
+**MPE.** EnSet-MADDPG and EnSet-FACMAC use a replay ratio of 25. MADDPG and FACMAC use a replay ratio of 1.
+
+<p align="center">
+  <img src="assets/mpe_results.png" width="100%">
+</p>
+
+**SMACv2.** EnSet-QMIX uses a replay ratio of 10 or 15. QMIX uses the default replay ratio of 1. Solid lines are medians and shaded areas are the 25th to 75th percentiles.
+
+<p align="center">
+  <img src="assets/smacv2_results.png" width="100%">
+</p>
 
 ## Structure
 
